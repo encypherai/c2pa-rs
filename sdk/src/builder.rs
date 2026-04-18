@@ -261,6 +261,65 @@ pub struct AssertionDefinition {
     pub created: bool,
 }
 
+/// Encypher fork patch (cawg-bstr-sentinel-v0.78.4):
+/// Convert a `serde_json::Value` into a `c2pa_cbor::value::Value`, recognizing
+/// a sentinel JSON object `{"$cbor_bstr_hex": "<hex>"}` as a CBOR byte string
+/// (major type 2). Upstream `c2pa_cbor::value::to_value` routes all JSON
+/// strings through `Value::Text`, which breaks CAWG Identity 1.2 CDDL fields
+/// (`signature`, `pad1`, `referenced_assertions[n].hash`) that must emit as
+/// bstr. This sentinel lets JSON-only callers (e.g. c2pa-python's Builder)
+/// plumb real byte strings through the manifest deserializer.
+///
+/// Non-sentinel values are converted with the same semantics as
+/// `c2pa_cbor::value::to_value` applied to a `serde_json::Value`.
+fn json_to_cbor_with_bstr_sentinel<E: serde::de::Error>(
+    v: serde_json::Value,
+) -> std::result::Result<c2pa_cbor::value::Value, E> {
+    use c2pa_cbor::value::Value as CborValue;
+    match v {
+        serde_json::Value::Null => Ok(CborValue::Null),
+        serde_json::Value::Bool(b) => Ok(CborValue::Bool(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(CborValue::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(CborValue::Float(f))
+            } else {
+                Err(E::custom(format!(
+                    "cbor conversion: number out of i64/f64 range: {}",
+                    n
+                )))
+            }
+        }
+        serde_json::Value::String(s) => Ok(CborValue::Text(s)),
+        serde_json::Value::Array(arr) => {
+            let mut items = Vec::with_capacity(arr.len());
+            for item in arr {
+                items.push(json_to_cbor_with_bstr_sentinel::<E>(item)?);
+            }
+            Ok(CborValue::Array(items))
+        }
+        serde_json::Value::Object(obj) => {
+            if obj.len() == 1 {
+                if let Some(serde_json::Value::String(hex_str)) = obj.get("$cbor_bstr_hex") {
+                    let bytes = hex::decode(hex_str).map_err(|e| {
+                        E::custom(format!("$cbor_bstr_hex decode error: {}", e))
+                    })?;
+                    return Ok(CborValue::Bytes(bytes));
+                }
+            }
+            let mut map = std::collections::BTreeMap::new();
+            for (k, v) in obj {
+                map.insert(
+                    CborValue::Text(k),
+                    json_to_cbor_with_bstr_sentinel::<E>(v)?,
+                );
+            }
+            Ok(CborValue::Map(map))
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for AssertionDefinition {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -281,8 +340,7 @@ impl<'de> Deserialize<'de> for AssertionDefinition {
         let data = match helper.kind {
             Some(ManifestAssertionKind::Json) => AssertionData::Json(helper.data),
             Some(ManifestAssertionKind::Cbor) | None => {
-                let cbor_val =
-                    c2pa_cbor::value::to_value(helper.data).map_err(serde::de::Error::custom)?;
+                let cbor_val = json_to_cbor_with_bstr_sentinel::<D::Error>(helper.data)?;
                 AssertionData::Cbor(cbor_val)
             }
             _ => {
