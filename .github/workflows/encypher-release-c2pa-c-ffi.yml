@@ -1,0 +1,62 @@
+name: Encypher - Release c2pa-c-ffi (CAWG bstr sentinel fork)
+
+# Publishes a libc2pa_c.so release asset plus SHA256SUMS whenever an
+# encypher-v* tag lands on this fork.  Consumed downstream by
+# encypherai-commercial/enterprise_api/Dockerfile, which curls the asset
+# and verifies the checksum before overlaying c2pa-python's bundled .so.
+#
+# See: encypherai-commercial/docs/development/C2PA_FORK_SYNC.md
+
+on:
+  push:
+    tags:
+      - 'encypher-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+
+      - name: Build c2pa-c-ffi (release, file_io)
+        run: cargo build --release -p c2pa-c-ffi --features file_io
+
+      - name: Stage release assets
+        id: stage
+        run: |
+          mkdir -p release-assets
+          cp target/release/libc2pa_c.so release-assets/libc2pa_c.so
+          ( cd release-assets && sha256sum libc2pa_c.so > SHA256SUMS )
+          echo "sha256=$(cut -d' ' -f1 release-assets/SHA256SUMS)" >> "$GITHUB_OUTPUT"
+          ls -la release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/libc2pa_c.so
+            release-assets/SHA256SUMS
+          fail_on_unmatched_files: true
+          body: |
+            Encypher fork build of `libc2pa_c.so` (linux-amd64) carrying the
+            CAWG Identity 1.2 `$cbor_bstr_hex` JSON->CBOR bstr sentinel patch
+            (`sdk/src/builder.rs`).
+
+            Consumed by encypherai-commercial monorepo; see
+            `docs/development/C2PA_FORK_SYNC.md`.
+
+            SHA-256 (libc2pa_c.so): `${{ steps.stage.outputs.sha256 }}`
