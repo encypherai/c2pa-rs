@@ -45,7 +45,7 @@ jobs:
           ls -la release-assets
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         with:
           files: |
             release-assets/libc2pa_c.so
